@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -6,62 +6,55 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  REGISTRY: registry.homelab.alamin.rocks
+  API_IMAGE: registry.homelab.alamin.rocks/niyyah/api
+  WEB_IMAGE: registry.homelab.alamin.rocks/niyyah/web
+
 jobs:
   test-api:
     runs-on: homelab-runner
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r apps/api/requirements.txt
-
-      - name: Run tests
-        run: cd apps/api && pytest -v
+      - run: pip install -r apps/api/requirements.txt
+      - run: cd apps/api && pytest -v
 
   lint-web:
     runs-on: homelab-runner
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - run: npm ci
+      - run: npm run lint
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-  build-web:
+  build-and-deploy:
     runs-on: homelab-runner
-    needs: lint-web
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install and build
-        run: npm ci && npm run build
-
-  docker-build:
-    runs-on: homelab-runner
-    needs: [test-api, build-web]
+    needs: [test-api, lint-web]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build API image
-        run: docker build -t niyyah-api apps/api/
+      - name: Log in to registry
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY }} -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
-      - name: Build web image
-        run: docker build -t niyyah-web apps/web/
+      - name: Build and push API
+        run: |
+          docker build -t ${{ env.API_IMAGE }}:latest apps/api/
+          docker push ${{ env.API_IMAGE }}:latest
+
+      - name: Build and push web
+        run: |
+          docker build -t ${{ env.WEB_IMAGE }}:latest apps/web/
+          docker push ${{ env.WEB_IMAGE }}:latest
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl rollout restart deployment/niyyah-api -n niyyah
+          kubectl rollout restart deployment/niyyah-web -n niyyah
+          kubectl rollout status deployment/niyyah-api -n niyyah --timeout=120s
+          kubectl rollout status deployment/niyyah-web -n niyyah --timeout=120s
